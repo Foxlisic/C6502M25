@@ -21,8 +21,8 @@ localparam
     IY  = 11,   IY2 = 12,   IY3 = 13,
     RUN = 14,   BRA = 15,
     JP1 = 16,   JP2 = 17,
-    JI1 = 18,   JI2 = 19,   JI3 = 20,   JI4 = 21,
-    TRM = 22;
+    JND = 18,   TRM = 19,   POP = 20,   JSR = 21,
+    RTS = 22;
 
 localparam
     ORA = 0,    AND = 1,    EOR = 2,    ADC = 3,
@@ -42,7 +42,7 @@ reg [ 7:0]  a, x, y, s, p;
 // Управление процессором
 // ------------------------------------------------------
 reg         cp;
-reg [ 5:0]  t;          // Состояние процессора
+reg [ 4:0]  t;          // Состояние процессора
 reg [ 2:0]  m;          // Процедура RUN
 reg [15:0]  ab, pc;
 reg [ 7:0]  op, w;      // Временный регистр
@@ -54,6 +54,7 @@ reg [ 1:0]  dst, src;
 wire [8:0] zpx = in + x;
 wire [8:0] zpy = in + y;
 wire [3:0] bra = {p[1], p[0], p[6], p[7]}; // 3=Z,C,V,0=N
+wire [7:0] sn  = s + 1;
 
 // Исполнение инструкции
 // ------------------------------------------------------
@@ -95,7 +96,9 @@ else if (ce) begin
 
         casex (in)
         8'b010_011_00: t <= JP1; // 4C
-        8'b011_011_00: t <= JI1; // 6C
+        8'b011_011_00: t <= JND; // 6C
+        8'b001_000_00: t <= JSR; // 20
+        8'b011_000_00: t <= RTS; // 60
         8'bxxx_000_x1: t <= IX;
         8'bxxx_010_x1,
         8'b1xx_000_x0: t <= RUN; // IMM
@@ -113,7 +116,7 @@ else if (ce) begin
         endcase
 
         // ---------------------------------------------------------------------
-        // Подготовка к исполнению или выполнение
+        // Подготовка к исполнению или выполнению
         // ---------------------------------------------------------------------
 
         casex (in)
@@ -132,6 +135,9 @@ else if (ce) begin
         // CPY, CPX
         8'b11x_000_00,
         8'b11x_xx1_00: begin alu <= CMP; end
+
+        // BIT
+        8'b001_0x1_00: begin alu <= BIT; end
 
         // DEC, INC
         8'b110_xx1_10,
@@ -154,6 +160,25 @@ else if (ce) begin
         8'b111_010_10: begin t <= LDC; end
         8'b100_110_10: begin t <= LDC; s <= x; end
         8'b101_110_10: begin x <= s; p[7] <= s[7]; p[1] <= s == 0; t <= LDC; end
+
+        // PHA, PHP
+        8'b0x0_010_00: begin
+
+            t   <= TRM;
+            we  <= 1;
+            cp  <= 1;
+            out <= in[6] ? a : (p | 8'h30);
+            ab  <= {8'h01, s};
+            s   <= s - 1;
+
+        end
+
+        // PLA, PLP
+        8'b0x1_010_00: begin t <= POP; cp <= 1; ab <= {8'h01, sn}; s <= sn; end
+
+        // RTS
+        8'b011_000_00: begin cp <= 1; ab <= {8'h01, sn}; end
+
         endcase
 
         // ---------------------------------------------------------------------
@@ -217,10 +242,35 @@ else if (ce) begin
     JP2: begin t <= LDC; pc <= {in, w}; end
 
     // JMP (IND)
-    JI1: begin t <= JI2; ab[ 7:0] <= in; pc <= pc + 1; end
-    JI2: begin t <= JI3; ab[15:8] <= in; pc <= pc + 1; cp <= 1; end
-    JI3: begin t <= JI4; pc[ 7:0] <= in; ab[7:0] <= ab[7:0] + 1; end
-    JI4: begin t <= LDC; pc[15:8] <= in; cp <= 0; end
+    JND: case (m)
+
+        0: begin m <= 1;   ab[ 7:0] <= in; pc <= pc + 1; end
+        1: begin m <= 2;   ab[15:8] <= in; pc <= pc + 1; cp <= 1; end
+        2: begin m <= 3;   pc[ 7:0] <= in; ab[7:0] <= ab[7:0] + 1; end
+        3: begin t <= LDC; pc[15:8] <= in; cp <= 0; end
+
+    endcase
+
+    // PLA, PLP
+    POP: begin t <= LDC; cp <= 0; if (op[6]) a <= in; else p <= in; end
+
+    // Jump Sub Routine
+    JSR: case (m)
+
+        0: begin m <= 1; w  <= in; pc <= pc + 1; end
+        1: begin m <= 2; we <= 1; out <= pc[15:8]; ab      <= {8'h01, s};  pc[15:8] <= in; cp <= 1;end
+        2: begin m <= 3; we <= 1; out <= pc[ 7:0]; ab[7:0] <= ab[7:0] - 1; pc[7:0]  <= w;  end
+        3: begin t <= LDC; cp <= 0; s <= s - 2; end
+
+    endcase
+
+    // Return from Subroutine
+    RTS: case (m)
+
+        0: begin m <= 1;   pc[7:0] <= in; ab[7:0] <= ab[7:0] + 1; end
+        1: begin t <= LDC; pc <= {in, pc[7:0]} + 1; s <= s + 2; end
+
+    endcase
 
     // Выполнение инструкции
     // -------------------------------------------------------------------------
@@ -261,10 +311,11 @@ else if (ce) begin
             // DEC, INC
             8'b0xx_xx1_10,
             8'b11x_xx1_10: begin t <= TRM; out <= R; we <= 1'b1; cp <= 1'b1; p <= F; end
-            // CMP, CPY, CPX
+            // CMP, CPY, CPX, BIT
             8'b110_xxx_01,
             8'b11x_000_00,
-            8'b11x_xx1_00: begin p <= F; end
+            8'b11x_xx1_00,
+            8'b001_0x1_00: begin p <= F; end
 
         endcase
 
