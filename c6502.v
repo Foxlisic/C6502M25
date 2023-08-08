@@ -43,6 +43,7 @@ reg [ 7:0]  a, x, y, s, p;
 // ------------------------------------------------------
 reg         cp;
 reg [ 5:0]  t;          // Состояние процессора
+reg [ 2:0]  m;          // Процедура RUN
 reg [15:0]  ab, pc;
 reg [ 7:0]  op, w;      // Временный регистр
 reg [ 3:0]  alu;        // Режим работы АЛУ
@@ -60,14 +61,14 @@ always @(posedge clock)
 // Состояние сброса процессора
 if (reset_n == 1'b0) begin
 
-    //       NV    ZC
-    p  <= 8'b00000001;
+    //       NV1BDIZC
+    p  <= 8'b01100001;
     t  <= 1'b0;
     cp <= 1'b0;
     pc <= 16'h0000;
     a  <= 8'h01;
     x  <= 8'hFE;
-    y  <= 8'h01;
+    y  <= 8'h00;
     s  <= 8'h00;
 
 end
@@ -76,16 +77,17 @@ else if (ce) begin
 
     rd  <= 1'b0;
     we  <= 1'b0;
-    dst <= DST_A;
-    src <= SRC_D;
 
     case (t)
 
     // Считывание опкода
     LDC: begin
 
-        pc <= pc + 1;
-        op <= in;
+        pc  <= pc + 1;
+        m   <= 0;
+        op  <= in;
+        dst <= DST_A;
+        src <= SRC_D;
 
         // Выбор метода адресации
         casex (in)
@@ -107,9 +109,31 @@ else if (ce) begin
         default:       t <= RUN;
         endcase
 
-        // Подготовка к исполнению
+        // Подготовка к исполнению или выполнение
         casex (in)
-        8'bxxx_xxx_01: alu <= in[7:5];
+        8'bxxx_xxx_01: begin alu <= in[7:5]; end
+
+        // Флаги
+        8'b00x_110_00: begin p[0] <= in[5]; t <= LDC; end // CLC, SEC
+        8'b01x_110_00: begin p[2] <= in[5]; t <= LDC; end // CLI, SEI
+        8'b101_110_00: begin p[6] <= 1'b0;  t <= LDC; end // CLV
+        8'b11x_110_00: begin p[3] <= in[5]; t <= LDC; end // CLD, SED
+
+        // ASL, ROL, LSR, ROR
+        8'b0xx_010_10: begin alu <= {1'b1, in[7:5]}; src <= SRC_A; end
+        8'b0xx_xx1_10: begin alu <= {1'b1, in[7:5]}; end
+        endcase
+
+        // Выбор op1
+        casex (in)
+        8'h86, 8'hA6, 8'hB6, 8'h96, 8'h8E,
+        8'hAE, 8'hBE, 8'hE0, 8'hA2, 8'hE4,
+        8'hCA, 8'h8A, 8'hE8, 8'hEC, 8'h9A:
+            dst <= DST_X;
+
+        8'hA0, 8'hC0, 8'h84, 8'hA4, 8'hC4, 8'h88, 8'hC8, 8'h8C,
+        8'hAC, 8'hCC, 8'h94, 8'hB4, 8'hBC:
+            dst <= DST_Y;
         endcase
 
     end
@@ -171,7 +195,11 @@ else if (ce) begin
             // CMP
             8'b110_xxx_01: begin p <= F; end
             // ORA, AND, ADC, EOR, SBC, LDA
-            8'bxxx_xxx_01: begin p <= F; a <= R; end
+            // ASL, ROL, LSR, ROR <ACC>
+            8'bxxx_xxx_01,
+            8'b0xx_010_10: begin p <= F; a <= R; end
+            // ASL, ROL, LSR, ROR
+            8'b0xx_xx1_10: begin t <= TRM; p <= F; out <= R; we <= 1'b1; cp <= 1'b1; end
 
         endcase
 
@@ -216,8 +244,8 @@ wire [8:0] R =
     alu == LSR ? {1'b0, op2[7:1]} :
     alu == ROR ? {cin, op2[7:1]} :
     alu == BIT ? op1 & op2 :
-    alu == DEC ? op2 - 1 :
-    alu == INC ? op2 + 1 : 0;
+    alu == DEC ? op1 - 1 :
+    alu == INC ? op1 + 1 : 0;
 
 // Вычисление флагов
 wire sign  =  R[7];        // Флаг знака
@@ -234,7 +262,7 @@ wire [7:0] F =
     alu == SBC ? {sign, osbc, p[5:2], zero, ~carry} :
     alu == ASL || alu == ROL ? {sign, p[6:2], zero, op2[7]} :
     alu == LSR || alu == ROR ? {sign, p[6:2], zero, op2[0]} :
-    alu == BIT ? {op2[7:6], p[5:2], zero, cin} :
-                 {sign,     p[6:2], zero, cin};
+    alu == BIT ? {op2[7:6], p[5:2], zero, p[0]} :
+                 {sign,     p[6:2], zero, p[0]};
 
 endmodule
