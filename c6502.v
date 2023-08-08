@@ -66,9 +66,9 @@ if (reset_n == 1'b0) begin
     t  <= 1'b0;
     cp <= 1'b0;
     pc <= 16'h0000;
-    a  <= 8'h01;
+    a  <= 8'h80;
     x  <= 8'hFE;
-    y  <= 8'h00;
+    y  <= 8'hDA;
     s  <= 8'h00;
 
 end
@@ -89,7 +89,10 @@ else if (ce) begin
         dst <= DST_A;
         src <= SRC_D;
 
+        // ---------------------------------------------------------------------
         // Выбор метода адресации
+        // ---------------------------------------------------------------------
+
         casex (in)
         8'b010_011_00: t <= JP1; // 4C
         8'b011_011_00: t <= JI1; // 6C
@@ -109,9 +112,33 @@ else if (ce) begin
         default:       t <= RUN;
         endcase
 
+        // ---------------------------------------------------------------------
         // Подготовка к исполнению или выполнение
+        // ---------------------------------------------------------------------
+
         casex (in)
+
+        // Базовые
         8'bxxx_xxx_01: begin alu <= in[7:5]; end
+
+        // STA, LDA, TAY, TXA, TAX, TYA
+        8'b100_xx1_x0: begin alu <= STA; end
+        8'b101_xx1_x0,
+        8'b101_000_x0,
+        8'b101_010_00,
+        8'b10x_010_10,
+        8'b100_110_00: begin alu <= LDA; end
+
+        // CPY, CPX
+        8'b11x_000_00,
+        8'b11x_xx1_00: begin alu <= CMP; end
+
+        // DEC, INC
+        8'b110_xx1_10,
+        8'b100_010_00,
+        8'b110_010_10: begin alu <= DEC; end
+        8'b111_xx1_10,
+        8'b11x_010_00: begin alu <= INC; end
 
         // Флаги
         8'b00x_110_00: begin p[0] <= in[5]; t <= LDC; end // CLC, SEC
@@ -122,18 +149,37 @@ else if (ce) begin
         // ASL, ROL, LSR, ROR
         8'b0xx_010_10: begin alu <= {1'b1, in[7:5]}; src <= SRC_A; end
         8'b0xx_xx1_10: begin alu <= {1'b1, in[7:5]}; end
+
+        // NOP, TXS, TSX
+        8'b111_010_10: begin t <= LDC; end
+        8'b100_110_10: begin t <= LDC; s <= x; end
+        8'b101_110_10: begin x <= s; p[7] <= s[7]; p[1] <= s == 0; t <= LDC; end
         endcase
 
-        // Выбор op1
+        // ---------------------------------------------------------------------
+        // Выбор op1 (dst)
+        // ---------------------------------------------------------------------
+
         casex (in)
-        8'h86, 8'hA6, 8'hB6, 8'h96, 8'h8E,
-        8'hAE, 8'hBE, 8'hE0, 8'hA2, 8'hE4,
-        8'hCA, 8'h8A, 8'hE8, 8'hEC, 8'h9A:
+        8'h86, 8'hA6, 8'hB6, 8'h96, 8'h8E, 8'hAE,
+        8'hBE, 8'hA2, 8'hCA, 8'hE8, 8'h9A,
+        8'hE0, 8'b111_xx1_00:
             dst <= DST_X;
 
-        8'hA0, 8'hC0, 8'h84, 8'hA4, 8'hC4, 8'h88, 8'hC8, 8'h8C,
-        8'hAC, 8'hCC, 8'h94, 8'hB4, 8'hBC:
+        8'hA0, 8'h84, 8'hA4, 8'h88, 8'hC8,
+        8'h8C, 8'hAC, 8'h94, 8'hB4, 8'hBC,
+        8'hC0, 8'b110_xx1_00:
             dst <= DST_Y;
+        endcase
+
+        // ---------------------------------------------------------------------
+        // Выбор op1 (src)
+        // ---------------------------------------------------------------------
+
+        case (in)
+        8'hE8, 8'hCA, 8'h8A: src <= SRC_X; // INX, DEX, TXA
+        8'h88, 8'hC8, 8'h98: src <= SRC_Y; // INY, DEY, TYA
+        8'hA8, 8'hAA: src <= SRC_A; // TAX, TAY
         endcase
 
     end
@@ -190,16 +236,35 @@ else if (ce) begin
         // Разбор операции
         casex (op)
 
-            // STA
-            8'b100_xxx_01: begin t <= TRM; out <= a; we <= 1'b1; cp <= 1'b1; end
-            // CMP
-            8'b110_xxx_01: begin p <= F; end
+            // STA,STY,STX
+            8'b100_xxx_01,
+            8'b100_xx1_x0: begin t <= TRM; out <= R; we <= 1'b1; cp <= 1'b1; end
             // ORA, AND, ADC, EOR, SBC, LDA
             // ASL, ROL, LSR, ROR <ACC>
+            // TXA, TYA
             8'bxxx_xxx_01,
-            8'b0xx_010_10: begin p <= F; a <= R; end
+            8'b0xx_010_10,
+            8'b100_010_10,
+            8'b100_110_00: begin a <= R; p <= F; end
+            // LDY, INY, DEY, TAY
+            8'b101_xx1_00,
+            8'b101_000_00,
+            8'b1x0_010_00,
+            8'b101_010_00: begin y <= R; p <= F; end
+            // LDX, INX, DEX, TAX
+            8'b101_xx1_10,
+            8'b101_000_10,
+            8'b111_010_00,
+            8'b110_010_10,
+            8'b101_010_10: begin x <= R; p <= F; end
             // ASL, ROL, LSR, ROR
-            8'b0xx_xx1_10: begin t <= TRM; p <= F; out <= R; we <= 1'b1; cp <= 1'b1; end
+            // DEC, INC
+            8'b0xx_xx1_10,
+            8'b11x_xx1_10: begin t <= TRM; out <= R; we <= 1'b1; cp <= 1'b1; p <= F; end
+            // CMP, CPY, CPX
+            8'b110_xxx_01,
+            8'b11x_000_00,
+            8'b11x_xx1_00: begin p <= F; end
 
         endcase
 
@@ -244,8 +309,8 @@ wire [8:0] R =
     alu == LSR ? {1'b0, op2[7:1]} :
     alu == ROR ? {cin, op2[7:1]} :
     alu == BIT ? op1 & op2 :
-    alu == DEC ? op1 - 1 :
-    alu == INC ? op1 + 1 : 0;
+    alu == DEC ? op2 - 1 :
+    alu == INC ? op2 + 1 : 0;
 
 // Вычисление флагов
 wire sign  =  R[7];        // Флаг знака
